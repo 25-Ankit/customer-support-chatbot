@@ -1,73 +1,124 @@
 import os
-import sqlite3
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from openai import OpenAI
 from pydantic import BaseModel
 
-load_dotenv("../.env")
+from chatbot.router import route_message
+
+
+# ---------------------------------------------------------
+# Environment Configuration
+# ---------------------------------------------------------
+
+BASE_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+ENV_FILE = os.path.join(
+    BASE_DIR,
+    ".env"
+)
+
+load_dotenv(ENV_FILE)
 
 api_key = os.getenv("OPENROUTER_API_KEY")
+
+
+# ---------------------------------------------------------
+# OpenRouter Client
+# ---------------------------------------------------------
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=api_key
 )
 
-DATABASE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "database",
-    "customer_support.db"
+
+# ---------------------------------------------------------
+# FastAPI Application
+# ---------------------------------------------------------
+
+app = FastAPI(
+    title="Customer Support Chatbot API",
+    description="Backend API for an AI-powered customer support system.",
+    version="1.0.0"
 )
 
-app = FastAPI()
 
+# ---------------------------------------------------------
+# Request Models
+# ---------------------------------------------------------
 
 class ChatRequest(BaseModel):
     message: str
 
 
+# ---------------------------------------------------------
+# Health / Home Endpoint
+# ---------------------------------------------------------
+
 @app.get("/")
 def home():
     return {
-        "message": "Customer Support Chatbot API is running"
+        "message": "Customer Support Chatbot API is running",
+        "status": "healthy"
     }
 
-@app.get("/orders/{order_id}")
-def get_order(order_id: int):
 
-    connection = sqlite3.connect(DATABASE)
-    connection.row_factory = sqlite3.Row
-
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT
-            orders.id AS order_id,
-            customers.name AS customer_name,
-            orders.product,
-            orders.status
-        FROM orders
-        JOIN customers
-            ON orders.customer_id = customers.id
-        WHERE orders.id = ?
-    """, (order_id,))
-
-    order = cursor.fetchone()
-
-    connection.close()
-
-    if order is None:
-        return {
-            "error": "Order not found"
-        }
-
-    return dict(order)
-
+# ---------------------------------------------------------
+# Chat Endpoint
+# ---------------------------------------------------------
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+
+    message = request.message.strip()
+
+    # Basic validation.
+    if not message:
+        return {
+            "error": "Message cannot be empty."
+        }
+
+    # -----------------------------------------------------
+    # Route the customer's request
+    # -----------------------------------------------------
+
+    routing_result = route_message(message)
+
+    intent = routing_result["intent"]
+
+    # -----------------------------------------------------
+    # Business Logic: Order Status
+    # -----------------------------------------------------
+
+    if intent == "ORDER_STATUS":
+
+        # If the router found an error, return it directly.
+        if "error" in routing_result:
+            return routing_result
+
+        order = routing_result.get("data")
+
+        return {
+            "user_message": message,
+            "intent": intent,
+            "source": "database",
+            "response": (
+                f"Your order #{order['order_id']} "
+                f"for {order['product']} is currently "
+                f"{order['status'].lower()}."
+            ),
+            "order": order
+        }
+
+    # -----------------------------------------------------
+    # Other intents → AI Assistant
+    # -----------------------------------------------------
 
     response = client.chat.completions.create(
         model="openrouter/free",
@@ -76,12 +127,16 @@ def chat(request: ChatRequest):
                 "role": "system",
                 "content": (
                     "You are a helpful customer support assistant. "
-                    "Give clear and concise answers."
+                    "Give clear, concise and professional answers. "
+                    "Do not invent order information, customer information, "
+                    "refund status, or other business data. "
+                    "If the system has not provided the required information, "
+                    "ask the customer for the necessary details."
                 )
             },
             {
                 "role": "user",
-                "content": request.message
+                "content": message
             }
         ]
     )
@@ -89,6 +144,9 @@ def chat(request: ChatRequest):
     reply = response.choices[0].message.content
 
     return {
-        "user_message": request.message,
+        "user_message": message,
+        "intent": intent,
+        "action": routing_result.get("action"),
+        "source": "ai",
         "bot_reply": reply
     }
