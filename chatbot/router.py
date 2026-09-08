@@ -3,15 +3,16 @@ from typing import Any
 from chatbot.intent import detect_intent, extract_order_id
 from backend.services.order_service import (
     get_order_status,
+    cancel_order,
     OrderServiceError,
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Intent → Action Mapping
-# ---------------------------------------------------------
+# =========================================================
 
-INTENT_ACTIONS = {
+INTENT_ACTIONS: dict[str, str] = {
     "CANCEL_ORDER": "cancel_order",
     "REFUND_REQUEST": "create_refund_request",
     "PRODUCT_INFO": "get_product_info",
@@ -23,9 +24,9 @@ INTENT_ACTIONS = {
 }
 
 
-# ---------------------------------------------------------
-# Response Helpers
-# ---------------------------------------------------------
+# =========================================================
+# Response Builder
+# =========================================================
 
 def build_response(
     message: str,
@@ -35,10 +36,14 @@ def build_response(
     error: str | None = None,
 ) -> dict:
     """
-    Build a consistent response structure for the router.
+    Build a consistent response object.
+
+    Keeping response construction in one place makes the
+    router easier to maintain and keeps API responses
+    predictable.
     """
 
-    response = {
+    response: dict[str, Any] = {
         "message": message,
         "intent": intent,
     }
@@ -55,16 +60,25 @@ def build_response(
     return response
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Order Status Handler
-# ---------------------------------------------------------
+# =========================================================
 
 def handle_order_status(message: str) -> dict:
     """
     Handle an order-status request.
 
-    Extracts the order ID, queries the order service,
-    and returns the result.
+    Flow:
+
+        User message
+             ↓
+        Extract order ID
+             ↓
+        Order service
+             ↓
+        Database
+             ↓
+        Response
     """
 
     order_id = extract_order_id(message)
@@ -77,13 +91,13 @@ def handle_order_status(message: str) -> dict:
         )
 
     try:
-
         order = get_order_status(order_id)
 
     except OrderServiceError:
         return build_response(
             message=message,
             intent="ORDER_STATUS",
+            action="get_order_status",
             error="Unable to retrieve order information right now.",
         )
 
@@ -91,6 +105,7 @@ def handle_order_status(message: str) -> dict:
         return build_response(
             message=message,
             intent="ORDER_STATUS",
+            action="get_order_status",
             error=f"Order {order_id} was not found.",
         )
 
@@ -102,19 +117,85 @@ def handle_order_status(message: str) -> dict:
     )
 
 
-# ---------------------------------------------------------
-# Main Router
-# ---------------------------------------------------------
+# =========================================================
+# Order Cancellation Handler
+# =========================================================
+
+def handle_order_cancellation(message: str) -> dict:
+    """
+    Handle a customer request to cancel an order.
+
+    Flow:
+
+        User message
+             ↓
+        Extract order ID
+             ↓
+        Cancellation business logic
+             ↓
+        Database update
+             ↓
+        Response
+    """
+
+    order_id = extract_order_id(message)
+
+    if order_id is None:
+        return build_response(
+            message=message,
+            intent="CANCEL_ORDER",
+            action="cancel_order",
+            error="Please provide your order ID.",
+        )
+
+    try:
+        result = cancel_order(order_id)
+
+    except OrderServiceError as error:
+        return build_response(
+            message=message,
+            intent="CANCEL_ORDER",
+            action="cancel_order",
+            error=str(error),
+        )
+
+    return build_response(
+        message=message,
+        intent="CANCEL_ORDER",
+        action="cancel_order",
+        data=result,
+    )
+
+
+# =========================================================
+# Main Message Router
+# =========================================================
 
 def route_message(message: str) -> dict:
     """
     Detect the customer's intent and route the request
-    to the appropriate application operation.
+    to the appropriate business operation.
+
+    Routing pipeline:
+
+        Input
+          ↓
+        Validation
+          ↓
+        Intent Detection
+          ↓
+        Specialized Handler
+          ↓
+        Business Service
+          ↓
+        Response
     """
 
-    # Basic input validation.
-    if not isinstance(message, str):
+    # -----------------------------------------------------
+    # Input validation
+    # -----------------------------------------------------
 
+    if not isinstance(message, str):
         return build_response(
             message=str(message),
             intent="UNKNOWN",
@@ -125,7 +206,6 @@ def route_message(message: str) -> dict:
     message = message.strip()
 
     if not message:
-
         return build_response(
             message="",
             intent="UNKNOWN",
@@ -133,16 +213,26 @@ def route_message(message: str) -> dict:
             error="Message cannot be empty.",
         )
 
-    # Detect customer's intent.
+    # -----------------------------------------------------
+    # Intent detection
+    # -----------------------------------------------------
+
     intent = detect_intent(message)
 
-    # Order status requires special processing because
-    # it needs an order ID and database lookup.
+    # -----------------------------------------------------
+    # Specialized business operations
+    # -----------------------------------------------------
+
     if intent == "ORDER_STATUS":
         return handle_order_status(message)
 
-    # All other currently supported intents use the
-    # central action mapping.
+    if intent == "CANCEL_ORDER":
+        return handle_order_cancellation(message)
+
+    # -----------------------------------------------------
+    # Generic intent → action routing
+    # -----------------------------------------------------
+
     action = INTENT_ACTIONS.get(
         intent,
         "handle_unknown",
@@ -152,4 +242,4 @@ def route_message(message: str) -> dict:
         message=message,
         intent=intent,
         action=action,
-    ) 
+    )
